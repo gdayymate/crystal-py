@@ -18,7 +18,7 @@ class Fruit:
       self.seed = generate_seed()
       self.pk = public_key
       self.data = f"{data}-{self.seed}"
-      self.tip = Blockchain.new_leaf
+      self.tip = Leaf
       self.neighbors = neighbors
       self.signature = self.sign_data(private_key)
       self.hash = self.calculate_hash()
@@ -71,12 +71,13 @@ class Fruit:
     return hashlib.sha256(data_to_hash.encode()).hexdigest()
 
 class Stem:
+  BASE_DIFFICULTY = 1  # You can adjust the base difficulty as needed
   def __init__(self, data, difficulty, rust_result, previous_hash):
        self.timestamp = datetime.now()
        self.data = data
-       self.difficulty = difficulty
+       self.difficulty = Stem.BASE_DIFFICULTY
        self.nonce = None       
-       self.tip = Blockchain.prev_leaf
+       self.tip = Leaf
        self.hash = rust_result()
        self.fruits_digest = set()
        self.fruits = []
@@ -104,130 +105,121 @@ class Stem:
             next_level.append((combined_hash, None))
         self.fruits = next_level
         
-  def calculate_hash(self, starting_nonce):
-    merkle_tree = self.build_merkle_tree()
-    data_to_hash = f"{self.data}{self.timestamp}{merkle_tree['root']}{self.tip if self.tip else ''}"
 
-    # Assuming calculate_stem_hash is a Rust function with appropriate bindings
-    rust_result, updated_nonce = calculate_stem_hash(
-        int(self.timestamp.timestamp()),
-        data_to_hash.encode('utf-8'),
-        [fruit[0].data for fruit in self.fruits],
-        self.hash,
-        int(starting_nonce)  # Pass the starting nonce to the Rust function
-    )
-        
-        # Check if the calculated hash satisfies the difficulty threshold
-        if rust_result[:self.difficulty] == b'\x00' * self.difficulty:
-            print("Stem found!")
-        elif rust_result[:self.difficulty] != b'\x00' * self.difficulty:
-            raise ValueError("Hash does not satisfy the difficulty threshold")
 
-        return rust_result, updated_nonce
+  def calculate_hash(self):
+        # Assuming calculate_stem_hash is a Rust function with appropriate bindings
+        rust_result, self.nonce = calculate_stem_hash(
+            int(self.timestamp.timestamp()),
+            f"{self.data}{self.timestamp}{self.tip if self.tip else ''}".encode('utf-8'),
+            [fruit.data for fruit in self.fruits],  # Use fruit.data instead of fruit[0].data
+            self.hash,
+            int(self.nonce or 0)
+        )
+
+        # Check if the calculated difficulty is significantly higher than the base difficulty
+        if self.difficulty >= 100 * Stem.BASE_DIFFICULTY:
+            print("New Leaf Found!")
+
+        return rust_result
 
   
 class Leaf(Stem):
    def __init__(self, data, public_key, difficulty, nonce):
       super().__init__(data, public_key, difficulty * 100)
 
+
 class Blockchain:
-    def __init__(self, Leaf):
+    def __init__(self):
         self.chain = []
-        self.create_genesis_block()
-        self.enlisted_producers = {}  # Dictionary to track enlisted producers per epoch
-        self.current_epoch =  0  # Variable to track the current epoch
+        self.enlisted_producers = {}
+        self.current_epoch = 0
+        self.most_recent_leaf_block = None  # Reference to the most recent Leaf block
 
     def create_genesis_block(self):
-        """Create the first block of the chain."""
-        genesis_block = Leaf("Genesis Block", "0",  1)  # Assuming Leaf is the correct starting block type
-        genesis_block.previous_hash = "0"
+        genesis_block = Leaf("Genesis Block", "0", 1, 0, self.most_recent_leaf_block)
         genesis_block.mine_block()
         self.chain.append(genesis_block)
+        self.most_recent_leaf_block = genesis_block  # Update the reference
 
-    def add_block(self, new_block):
-       """Add a new block to the chain if it's valid."""
-       if not self.is_valid_block(new_block):
-           return False
-
-       # Check for double spending
-       spent_outputs = set()
-       for tx in new_block.transactions:
-           if any(input.id in spent_outputs for input in tx.inputs):
-               return False
-
-           spent_outputs |= {output.id for output in tx.outputs}
-
-       # Validate transaction signatures
-       for tx in new_block.transactions:
-           if not tx.verify():
-               return False
-
-       self.chain.append(new_block)
-       return True
-
-    def is_valid_block(self, block):
-        """Validate a block."""
-        last_block = self.get_last_block()
-        if last_block.hash != block.previous_hash:
+    def add_leaf(self, new_leaf):
+        if not isinstance(new_leaf, Leaf):
+            print("Invalid block type. Expected Leaf.")
             return False
-        # Additional validation checks can be implemented here
-        # For example, verify the block's hash, check for duplicate transactions, etc.
+
+        if not self.is_valid_leaf(new_leaf):
+            print("Invalid leaf block.")
+            return False
+
+        self.chain.append(new_leaf)
+        self.most_recent_leaf_block = new_leaf  # Update the reference
+        self.update_dag(self.get_last_block(), new_leaf)
+
+        for fruit in new_leaf.fruits:
+            new_leaf.fruits_digest.add(fruit.hash)
+
+        if new_leaf.previous_hash:
+            prev_leaf = self.get_leaf_by_hash(new_leaf.previous_hash)
+            if prev_leaf:
+                self.enlist_producers(prev_leaf.enlisted_producers)
+
         return True
 
+    def is_valid_leaf(self, leaf):
+        if not leaf.verify():
+            print("Invalid leaf block signature.")
+            return False
+
+        last_block = self.get_last_block()
+        if last_block.hash != leaf.previous_hash:
+            print("Invalid leaf block. Previous hash mismatch.")
+            return False
+
+        # Additional validation checks can be added here
+
+        return True
 
     def get_last_block(self):
-        """Retrieve the most recent Leaf block in the chain."""
         for block in reversed(self.chain):
-                if isinstance(block, Leaf):
-                    return block
+            if isinstance(block, Leaf):
+                return block
         return None
 
     def enlist_producer(self, public_key, max_epochs=2):
-     """Enlist a producer for up to 'max_epochs' epochs."""
-     if self.current_epoch + 1 not in self.enlisted_producers:
-         self.enlisted_producers[self.current_epoch + 1] = {public_key: max_epochs}
-     elif public_key in self.enlisted_producers[self.current_epoch + 1]:
-         self.enlisted_producers[self.current_epoch + 1][public_key] -= 1
-         if self.enlisted_producers[self.current_epoch + 1][public_key] == 0:
-             del self.enlisted_producers[self.current_epoch + 1][public_key]
-     else:
-         self.enlisted_producers[self.current_epoch + 1][public_key] = max_epochs
+        if self.current_epoch + 1 not in self.enlisted_producers:
+            self.enlisted_producers[self.current_epoch + 1] = {public_key: max_epochs}
+        elif public_key in self.enlisted_producers[self.current_epoch + 1]:
+            self.enlisted_producers[self.current_epoch + 1][public_key] -= 1
+            if self.enlisted_producers[self.current_epoch + 1][public_key] == 0:
+                del self.enlisted_producers[self.current_epoch + 1][public_key]
+        else:
+            self.enlisted_producers[self.current_epoch + 1][public_key] = max_epochs
 
     def extend_branch(self, new_leaf):
-       """Extend the block-tree with a new leaf."""
-       if isinstance(new_leaf, Leaf):
-           # Ensure the new leaf is valid and extends the chain correctly
-           if self.is_valid_block(new_leaf):
-               self.chain.append(new_leaf)
+        if isinstance(new_leaf, Leaf):
+            if self.is_valid_leaf(new_leaf):  # Corrected method name
+                last_block = self.get_last_block()
+                if last_block:
+                    new_leaf.previous_hash = last_block.hash
+                else:
+                    print("No blocks in the chain. Ensure a genesis block is created first.")
+                    return False
 
-               # Assuming you have a method to update the DAG, ensure it's called here
-               self.update_dag(self.get_last_block(), Fruit, Stem, new_leaf)
-               # Move active Fruits to the digest_list after mining
-               for fruit in new_leaf.fruits:
-                  # Assuming digest_list is correctly defined and used
-                  new_leaf.fruits_digest.add(fruit.hash)
-
-               # Enlist producers based on the list provided by the previous leaf
-               if new_leaf.previous_hash:
-                  prev_leaf = self.get_leaf_by_hash(new_leaf.previous_hash)
-                  if prev_leaf:
-                      self.enlist_producers(prev_leaf.enlisted_producers)
-
-               return True
-           else:
-               print("New leaf is not valid.")
-               return False
+                self.chain.append(new_leaf)
+                self.update_dag(last_block, new_leaf)
+                for fruit in new_leaf.fruits:
+                    new_leaf.fruits_digest.add(fruit.hash)
+                if new_leaf.previous_hash:
+                    prev_leaf = self.get_leaf_by_hash(new_leaf.previous_hash)
+                    if prev_leaf:
+                        self.enlist_producers(prev_leaf.enlisted_producers)
+                return True
+            else:
+                print("New leaf is not valid.")
+                return False
 
     def get_leaf_by_hash(self, hash):
-       """Retrieve the leaf block with the given hash."""
-       for block in reversed(self.chain):
-           if isinstance(block, Leaf) and block.hash == hash:
-               return block
-       return None
-        
-    def start_new_epoch(self):
-        self.current_epoch +=  1
-        self.enlisted_producers[self.current_epoch] = []
-
-    def enlist_producer(self, public_key):
-        self.enlisted_producers[self.current_epoch].append(public_key)
+        for block in reversed(self.chain):
+            if isinstance(block, Leaf) and block.hash == hash:
+                return block
+        return None
