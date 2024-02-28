@@ -104,15 +104,18 @@ class Stem:
             next_level.append((combined_hash, None))
         self.fruits = next_level
         
-  def calculate_hash(self):
-        # Assuming calculate_stem_hash is a Rust function with appropriate bindings
-        rust_result, self.nonce = calculate_stem_hash(
-            int(self.timestamp.timestamp()),
-            f"{self.data}{self.timestamp}{self.tip if self.tip else ''}".encode('utf-8'),
-            [fruit[0].data for fruit in self.fruits],
-            self.hash,
-            int(self.nonce or 0)
-        )
+  def calculate_hash(self, starting_nonce):
+    merkle_tree = self.build_merkle_tree()
+    data_to_hash = f"{self.data}{self.timestamp}{merkle_tree['root']}{self.tip if self.tip else ''}"
+
+    # Assuming calculate_stem_hash is a Rust function with appropriate bindings
+    rust_result, updated_nonce = calculate_stem_hash(
+        int(self.timestamp.timestamp()),
+        data_to_hash.encode('utf-8'),
+        [fruit[0].data for fruit in self.fruits],
+        self.hash,
+        int(starting_nonce)  # Pass the starting nonce to the Rust function
+    )
         
         # Check if the calculated hash satisfies the difficulty threshold
         if rust_result[:self.difficulty] == b'\x00' * self.difficulty:
@@ -120,7 +123,7 @@ class Stem:
         elif rust_result[:self.difficulty] != b'\x00' * self.difficulty:
             raise ValueError("Hash does not satisfy the difficulty threshold")
 
-        return rust_result
+        return rust_result, updated_nonce
 
   
 class Leaf(Stem):
