@@ -71,13 +71,13 @@ class Fruit:
     return hashlib.sha256(data_to_hash.encode()).hexdigest()
 
 class Stem:
-  def __init__(self, data, difficulty):
+  def __init__(self, data, difficulty, rust_result, previous_hash):
        self.timestamp = datetime.now()
        self.data = data
        self.difficulty = difficulty
        self.nonce = None       
-       self.tip = Blockchain.new_leaf
-       self.hash = None
+       self.tip = Blockchain.prev_leaf
+       self.hash = rust_result()
        self.fruits_digest = set()
        self.fruits = []
 
@@ -164,33 +164,55 @@ class Blockchain:
         return True
 
 
-    def get_last_leaf_block(self):
+    def get_last_block(self):
         """Retrieve the most recent Leaf block in the chain."""
         for block in reversed(self.chain):
                 if isinstance(block, Leaf):
                     return block
         return None
 
+    def enlist_producer(self, public_key, max_epochs=2):
+     """Enlist a producer for up to 'max_epochs' epochs."""
+     if self.current_epoch + 1 not in self.enlisted_producers:
+         self.enlisted_producers[self.current_epoch + 1] = {public_key: max_epochs}
+     elif public_key in self.enlisted_producers[self.current_epoch + 1]:
+         self.enlisted_producers[self.current_epoch + 1][public_key] -= 1
+         if self.enlisted_producers[self.current_epoch + 1][public_key] == 0:
+             del self.enlisted_producers[self.current_epoch + 1][public_key]
+     else:
+         self.enlisted_producers[self.current_epoch + 1][public_key] = max_epochs
+
     def extend_branch(self, new_leaf):
-        """Extend the block-tree with a new leaf."""
-        if isinstance(new_leaf, Leaf):
-            # Ensure the new leaf is valid and extends the chain correctly
-            if self.is_valid_block(new_leaf):
-                self.chain.append(new_leaf)
-                
-                # Assuming you have a method to update the DAG, ensure it's called here
-                self.update_dag(self.get_last_block(), Fruit, Stem, new_leaf)
-                # Move active Fruits to the digest_list after mining
-                for fruit in new_leaf.fruits:
-                    # Assuming digest_list is correctly defined and used
-                    new_leaf.digest_list.add(fruit.hash)
-                return True
-            else:
-                print("New leaf is not valid.")
-                return False
-        else:
-            print("Provided object is not a Leaf instance.")
-            return False
+       """Extend the block-tree with a new leaf."""
+       if isinstance(new_leaf, Leaf):
+           # Ensure the new leaf is valid and extends the chain correctly
+           if self.is_valid_block(new_leaf):
+               self.chain.append(new_leaf)
+
+               # Assuming you have a method to update the DAG, ensure it's called here
+               self.update_dag(self.get_last_block(), Fruit, Stem, new_leaf)
+               # Move active Fruits to the digest_list after mining
+               for fruit in new_leaf.fruits:
+                  # Assuming digest_list is correctly defined and used
+                  new_leaf.fruits_digest.add(fruit.hash)
+
+               # Enlist producers based on the list provided by the previous leaf
+               if new_leaf.previous_hash:
+                  prev_leaf = self.get_leaf_by_hash(new_leaf.previous_hash)
+                  if prev_leaf:
+                      self.enlist_producers(prev_leaf.enlisted_producers)
+
+               return True
+           else:
+               print("New leaf is not valid.")
+               return False
+
+    def get_leaf_by_hash(self, hash):
+       """Retrieve the leaf block with the given hash."""
+       for block in reversed(self.chain):
+           if isinstance(block, Leaf) and block.hash == hash:
+               return block
+       return None
         
     def start_new_epoch(self):
         self.current_epoch +=  1
