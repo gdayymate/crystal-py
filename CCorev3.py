@@ -11,14 +11,15 @@ def generate_seed():
 
 
 class Fruit:
-   def __init__(self, transactions, neighbors, public_key, private_key, blockchain):
-       self.timestamp = datetime.now()
+   def __init__(self, data, neighbors, public_key, private_key, epoch_public):
+       self.timestamp = datetime.datetime.now()
        self.seed = generate_seed()
-       self.data = f"{transactions}-{self.seed}"
+       self.data = f"{data}-{self.seed}"
        self.tip = None
        self.neighbors = neighbors
        self.signature = self.sign_data(private_key)
        self.hash = self.calculate_hash()
+       self.epoch = epoch_public
 
    def calculate_hash(self):
        data_to_hash = f"{self.data}{self.timestamp}{self.seed}{self.tip if self.tip else ''}"
@@ -32,18 +33,23 @@ class Fruit:
    def verify(self, public_key):
        try:
            public_key.verify(self.signature, self.data.encode())
+
+           # Check if this fruit is assigned to the current epoch
+           if public_key.to_string().hex() not in self.epoch_public_keys:
+               raise ValueError("Public key not assigned to this epoch")
+
            return True
        except ValueError:
            return False
 
    def most_recent_leaf(self, blockchain):
-      """Update the tip to the hash of the most recent Leaf block."""
-      # Assuming get_last_leaf_block() returns the most recent Leaf block
-      most_recent_leaf = blockchain.get_last_leaf_block()
-      if most_recent_leaf:
-          self.tip = most_recent_leaf.hash
-          self.hash = self.calculate_hash()
-    
+       """Update the tip to the hash of the most recent Leaf block."""
+       # Assuming get_last_leaf_block() returns the most recent Leaf block
+       most_recent_leaf = blockchain.get_last_leaf_block()
+       if most_recent_leaf:
+           self.tip = most_recent_leaf.hash
+           self.hash = self.calculate_hash()
+       
 def merkle_root(transactions):
    if len(transactions) == 1:
        return transactions[0].hash
@@ -102,6 +108,8 @@ class Stem:
 
        self.nonce = nonce
        self.hash = self.calculate_hash()
+       self.digest |= {fruit.hash for fruit in self.active_list}
+       self.fruits = []
     
 class Leaf(Stem):
    def __init__(self, data, public_key, difficulty):
