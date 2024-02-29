@@ -93,6 +93,14 @@ class Stem:
      else:
         print("Fruit producer is not enlisted for this epoch.")
 
+   def verify(self, fruit):
+       try:
+           public_key = VerifyingKey.from_string(bytes.fromhex(fruit.public_key), curve=SECP256k1)
+           public_key.verify(fruit.signature, fruit.data.encode(), hashfunc=hashlib.sha256)
+           return True
+       except ValueError:
+           return False
+
   def update_merkle_tree(self):
  # Sort the list of fruits based on their hash values in ascending order
         self.fruits.sort(key=lambda x: x.hash)
