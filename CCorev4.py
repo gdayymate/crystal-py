@@ -4,6 +4,7 @@ from transactions import Transaction
 from ecdsa import SigningKey, SECP256k1, VerifyingKey
 from rusty import calculate_stem_hash
 import os
+import EpochLogic
 from time import perf_counter
  
 from config import SEED_LENGTH, DIFFICULTY, EPOCHS, NUM_PRODUCERS
@@ -206,28 +207,31 @@ class Blockchain:
         else:
             self.enlisted_producers[self.current_epoch + 1][public_key] = max_epochs
 
-    def extend_branch(self, new_leaf):
-        if isinstance(new_leaf, Leaf):
-            if self.is_valid_leaf(new_leaf):  # Corrected method name
-                last_block = self.get_last_block()
-                if last_block:
-                    new_leaf.previous_hash = last_block.hash
-                else:
-                    print("No blocks in the chain. Ensure a genesis block is created first.")
-                    return False
+   def extend_branch(self, new_leaf):
+   """Extend the block-tree with a new leaf."""
+   if isinstance(new_leaf, Leaf):
+       # Ensure the new leaf is valid and extends the chain correctly
+       if self.add_block(new_leaf):
+           # Assuming you have a method to update the DAG, ensure it's called here
+           self.update_dag(self.get_last_block(), new_leaf)
 
-                self.chain.append(new_leaf)
-                self.update_dag(last_block, new_leaf)
-                for fruit in new_leaf.fruits:
-                    new_leaf.fruits_digest.add(fruit.hash)
-                if new_leaf.previous_hash:
-                    prev_leaf = self.get_leaf_by_hash(new_leaf.previous_hash)
-                    if prev_leaf:
-                        self.enlist_producers(prev_leaf.enlisted_producers)
-                return True
-            else:
-                print("New leaf is not valid.")
-                return False
+           # Move active Fruits to the digest_list after mining
+           for fruit, _ in new_leaf.fruits:
+               # Assuming digest_list is correctly defined and used
+               new_leaf.digest_list.add(fruit.hash)
+
+           # Start a new epoch since a new leaf has been mined
+           self.start_next_epoch()
+
+           # Enlist valid fruit producers for the next epoch
+           for fruit in new_leaf.fruits:
+               if fruit.is_valid_signature():
+                 self.enlist_producer(fruit.public_key)
+
+           return True
+      else:
+          print("New leaf is not valid.")
+          return False
 
     def get_leaf_by_hash(self, hash):
         for block in reversed(self.chain):
