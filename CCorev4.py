@@ -2,10 +2,10 @@ import hashlib
 import datetime
 from transactions import Transaction
 from ecdsa import SigningKey, SECP256k1, VerifyingKey
-from rusty import mine_for_nonce_range, calculate_stem_hash
+from rusty import calculate_stem_hash
 import os
 from time import perf_counter
-
+ 
 from config import SEED_LENGTH, DIFFICULTY, EPOCHS, NUM_PRODUCERS
 
 def generate_seed():
@@ -18,7 +18,7 @@ class Fruit:
       self.seed = generate_seed()
       self.pk = public_key
       self.data = f"{data}-{self.seed}"
-      self.tip = Leaf
+      self.tip = None
       self.neighbors = neighbors
       self.signature = self.sign_data(private_key)
       self.hash = self.calculate_hash()
@@ -26,7 +26,7 @@ class Fruit:
 
   def verify_signatures(self, fruit):
       try:
-          verifying_key = VerifyingKey.from_string(bytes.fromhex(fruit.public_key), curve=SECP256k1)
+          verifying_key = VerifyingKey.from_string(bytes.fromhex(fruit.pk), curve=SECP256k1)
           verifying_key.verify(fruit.signature, fruit.data.encode(), hashfunc=hashlib.sha256)
           return True
       except ValueError:
@@ -93,14 +93,6 @@ class Stem:
      else:
         print("Fruit producer is not enlisted for this epoch.")
 
-   def verify(self, fruit):
-       try:
-           public_key = VerifyingKey.from_string(bytes.fromhex(fruit.public_key), curve=SECP256k1)
-           public_key.verify(fruit.signature, fruit.data.encode(), hashfunc=hashlib.sha256)
-           return True
-       except ValueError:
-           return False
-
   def update_merkle_tree(self):
  # Sort the list of fruits based on their hash values in ascending order
         self.fruits.sort(key=lambda x: x.hash)
@@ -113,7 +105,6 @@ class Stem:
             next_level.append((combined_hash, None))
         self.fruits = next_level
         
-
 
   def calculate_hash(self):
         # Assuming calculate_stem_hash is a Rust function with appropriate bindings
@@ -133,8 +124,8 @@ class Stem:
 
   
 class Leaf(Stem):
-   def __init__(self, data, public_key, difficulty, nonce):
-      super().__init__(data, public_key, difficulty * 100)
+    def __init__(self, data, difficulty, rust_result, previous_hash):
+        super().__init__(data, difficulty, rust_result, previous_hash)
 
 
 class Blockchain:
@@ -142,7 +133,19 @@ class Blockchain:
         self.chain = []
         self.enlisted_producers = {}
         self.current_epoch = 0
-        self.most_recent_leaf_block = None  # Reference to the most recent Leaf block
+        self.most_recent_leaf_ = None  # Reference to the most recent Leaf block
+        self.most_recent_stem = None # Track the most recent stem
+
+    def add_stem(self, new_stem):
+        # Check if the new stem should be considered a Leaf
+        if self.most_recent_stem and new_stem.difficulty >= 100 * self.most_recent_stem.difficulty:
+            # Convert the new stem to a Leaf
+            new_leaf = Leaf(new_stem.data, new_stem.difficulty, new_stem.rust_result, new_stem.previous_hash)
+            self.add_leaf(new_leaf)
+        else:
+            # Add the new stem as a regular stem
+            self.chain.append(new_stem)
+            self.most_recent_stem = new_stem 
 
     def create_genesis_block(self):
         genesis_block = Leaf("Genesis Block", "0", 1, 0, self.most_recent_leaf_block)
