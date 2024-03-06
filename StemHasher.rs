@@ -1,11 +1,19 @@
+#StemHasherv2
 // StemHasher.rs
 
 use pyo3::prelude::*;
 use blake3::{Hasher, OUT_LEN};
-use std::convert::TryInto;
 
 #[pyfunction]
-fn calculate_stem_hash(py: Python, timestamp: u64, data: &str, fruits: Vec<&str>, previous_hash: &str, starting_nonce: u64, difficulty: u32) -> PyResult<(String, u64)> {
+fn calculate_stem_hash(
+    py: Python,
+    timestamp: u64,
+    data: &str,
+    fruits: Vec<&str>,
+    previous_hash: &str,
+    starting_nonce: u64,
+    difficulty: u32,
+) -> PyResult<(String, u64)> {
     let mut nonce = starting_nonce;
     loop {
         let mut hasher = Hasher::new();
@@ -53,10 +61,3 @@ fn _mine_for_nonce_range(data: Vec<u8>, previous_hash: String, difficulty: u32) 
             hasher.update(previous_hash.as_bytes());
         }
     }
-
-    None
-}
-
-  
-    None
-  }
