@@ -33,7 +33,7 @@ class Fruit:
       except ValueError:
           return False
 
-  def check_signatures(self, fruit):
+  def add_neighbors(self, fruit):
       if self.verify_signatures(fruit):
           self.neighbors.append(fruit)
       else:
