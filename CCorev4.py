@@ -124,23 +124,28 @@ class Blockchain:
             self.chain.append(new_stem)
             self.most_recent_stem = new_stem
 
-    def add_leaf(self, new_leaf):
-        if not isinstance(new_leaf, Leaf):
-            print("Invalid block type. Expected Leaf.")
-            return False
-        if not self.is_valid_leaf(new_leaf):
-            print("Invalid leaf block.")
-            return False
-        self.chain.append(new_leaf)
-        self.most_recent_leaf = new_leaf
-        self.update_dag(self.get_last_block(), new_leaf)
-        for fruit in new_leaf.fruits:
-            new_leaf.fruits_digest.add(fruit.hash)
-        if new_leaf.previous_hash:
-            prev_leaf = self.get_leaf_by_hash(new_leaf.previous_hash)
-            if prev_leaf:
-                self.enlist_producer(prev_leaf.public_key, max_epochs=2)
-        return True
+    def extend_branch(self, new_leaf):
+        if isinstance(new_leaf, Leaf):
+            if self.is_valid_leaf(new_leaf):
+                last_block = self.get_last_block()
+                if last_block:
+                    new_leaf.previous_hash = last_block.hash
+                else:
+                    print("No blocks in the chain. Ensure a genesis block is created first.")
+                    return False
+                self.chain.append(new_leaf)
+                self.start_next_epoch()
+                self.update_dag(last_block, new_leaf)
+                for fruit in new_leaf.fruits:
+                    new_leaf.fruits_digest.add(fruit.hash)
+                if new_leaf.previous_hash:
+                    prev_leaf = self.get_leaf_by_hash(new_leaf.previous_hash)
+                    if prev_leaf:
+                        self.enlist_producer(prev_leaf.public_key)
+                return True
+            else:
+                print("New leaf is not valid.")
+                return False
 
     def is_valid_leaf(self, leaf):
         if not leaf.verify():
@@ -158,7 +163,7 @@ class Blockchain:
                 return block
         return None
 
-    def enlist_producer(self, public_key, max_epochs=2):
+    def enlist_producer(self, public_key, max_epochs=3):
         if self.current_epoch + 1 not in self.enlisted_producers:
             self.enlisted_producers[self.current_epoch + 1] = {public_key: max_epochs}
         elif public_key in self.enlisted_producers[self.current_epoch + 1]:
@@ -172,32 +177,8 @@ class Blockchain:
         """Checks if a producer is enlisted for a given epoch."""
         return public_key in self.enlisted_producers.get(epoch, [])       
 
-
-    def extend_branch(self, new_leaf):
-        if isinstance(new_leaf, Leaf):
-            if self.is_valid_leaf(new_leaf):
-                last_block = self.get_last_block()
-                if last_block:
-                    new_leaf.previous_hash = last_block.hash
-                else:
-                    print("No blocks in the chain. Ensure a genesis block is created first.")
-                    return False
-                self.chain.append(new_leaf)
-                self.update_dag(last_block, new_leaf)
-                for fruit in new_leaf.fruits:
-                    new_leaf.fruits_digest.add(fruit.hash)
-                if new_leaf.previous_hash:
-                    prev_leaf = self.get_leaf_by_hash(new_leaf.previous_hash)
-                    if prev_leaf:
-                        self.enlist_producer(prev_leaf.public_key, max_epochs=2)
-                return True
-            else:
-                print("New leaf is not valid.")
-                return False
-
     def get_leaf_by_hash(self, hash):
         for block in reversed(self.chain):
             if isinstance(block, Leaf) and block.hash == hash:
                 return block
         return None
-
