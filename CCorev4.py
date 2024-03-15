@@ -2,12 +2,12 @@ import hashlib
 import datetime
 from transactions import Transaction
 from ecdsa import SigningKey, SECP256k1, VerifyingKey
-from rusty import calculate_stem_hash
+from StemHasherv3 import calculate_stem_hash
 import os
 from time import perf_counter
 import logging
 
-from config import SEED_LENGTH, DIFFICULTY, EPOCHS, NUM_PRODUCERS
+from config import DIFFICULTY, LEAF_DIFFICULTY_THRESHOLD, INITIAL_COMMITTEE, EPOCHS
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -55,13 +55,13 @@ class Fruit:
             logging.error(f"Error signing data: {e}")
             return None
 
-    def verify(self, fruit, current_epoch, blockchain, public_key):
+    def verify(self, blockchain, public_key):
         try:
             public_key.verify(self.signature, self.data.encode())
-            if fruit.pk not in blockchain.enlisted_producers.get(current_epoch, []):
+            if self.pk not in blockchain.enlisted_producers.get(self.epoch, {}):
                 raise ValueError("Public key not assigned to this epoch")
             return True
-        except ValueError as e:
+        except (ValueError, KeyError) as e:
             logging.error(f"Error verifying fruit: {e}")
             return False
 
@@ -83,13 +83,15 @@ class Stem:
         self.merkle_root = None
 
     def add_fruit_and_update_merkle_tree(self, fruit, blockchain):
-        if fruit.hash not in self.fruits_digest and fruit.verify(fruit, blockchain.current_epoch, blockchain, fruit.pk):
+        if fruit.hash not in self.fruits_digest and fruit.verify(blockchain, fruit.pk):
             self.fruits.append(fruit)
             self.update_merkle_tree()
             logging.info(f"Added fruit {fruit.hash} to the stem")
             blockchain.enlist_producer(fruit.pk)  # Re-enlist the producer
+            return True
         else:
-            logging.warning("Fruit producer is not enlisted for this epoch.")
+            logging.warning("Fruit verification failed or fruit already exists in the stem.")
+            return False
 
     def update_merkle_tree(self):
         self.fruits.sort(key=lambda x: x.hash)
@@ -100,28 +102,32 @@ class Stem:
         if not leaves:
             return None
 
-        if len(leaves) == 1:
-            return leaves[0]
+        while len(leaves) > 1:
+            if len(leaves) % 2 != 0:
+                leaves.append(leaves[-1])  # Duplicate the last leaf if the number of leaves is odd
+            new_leaves = []
+            for i in range(0, len(leaves), 2):
+                left = leaves[i]
+                right = leaves[i + 1]
+                combined_hash = hashlib.sha256(f"{left}{right}".encode()).hexdigest()
+                new_leaves.append(combined_hash)
+            leaves = new_leaves
 
-        new_leaves = []
-        for i in range(0, len(leaves), 2):
-            left = leaves[i]
-            right = leaves[i + 1] if i + 1 < len(leaves) else left
-            combined_hash = hashlib.sha256(f"{left}{right}".encode()).hexdigest()
-            new_leaves.append(combined_hash)
-
-        return self.calculate_merkle_root(new_leaves)
+        return leaves[0]
 
     def calculate_hash(self):
         try:
-            rust_result, self.nonce = calculate_stem_hash(
+            rust_result, self.nonce, is_leaf = calculate_stem_hash(
                 int(self.timestamp.timestamp()),
-                f"{self.data}{self.timestamp}{self.tip if self.tip else ''}".encode('utf-8'),
-                [fruit.data for fruit in self.fruits],
+                self.data.encode('utf-8'),
+                [fruit.data.encode('utf-8') for fruit in self.fruits],
                 self.hash,
-                int(self.nonce or 0)
+                int(self.nonce or 0),
+                DIFFICULTY,
+                LEAF_DIFFICULTY_THRESHOLD
             )
-            if self.difficulty >= 100 * Stem.BASE_DIFFICULTY:
+            self.hash = rust_result
+            if is_leaf:
                 logging.info("New Leaf Found!")
                 return rust_result, True  # Return a flag indicating a new leaf
             return rust_result, False
@@ -129,15 +135,27 @@ class Stem:
             logging.error(f"Error calculating stem hash: {e}")
             return None, False
 
+    def is_valid_stem(self):
+        # Check if the stem hash meets the required difficulty
+        if not self.hash.startswith('1' * DIFFICULTY):
+            return False
+        return True
+
+
 class Leaf(Stem):
-    def __init__(self, data, difficulty, rust_result, previous_hash, signature=None):
+    def __init__(self, data, difficulty, rust_result, previous_hash):
         super().__init__(data, difficulty, rust_result, previous_hash)
-        self.signature = signature
+
+    def is_valid_leaf(self):
+        # Check if the leaf hash meets the required leaf difficulty
+        if not self.hash.startswith('1' * LEAF_DIFFICULTY_THRESHOLD):
+            return False
+        return True
 
 class Blockchain:
     def __init__(self):
         self.chain = []
-        self.enlisted_producers = {}
+        self.enlisted_producers = {0: {pk: float('inf') for pk in INITIAL_COMMITTEE}}
         self.current_epoch = 0
         self.most_recent_leaf = None
         self.most_recent_stem = None
@@ -146,71 +164,66 @@ class Blockchain:
         new_hash, is_new_leaf = new_stem.calculate_hash()
         if is_new_leaf:
             new_leaf = Leaf(new_stem.data, new_stem.difficulty, new_hash, new_stem.previous_hash)
-            for fruit in self.get_all_fruits():
-                fruit.update_prev_stem(new_stem)
-            self.extend_branch(new_leaf)
+            if new_leaf.is_valid_leaf():
+                self.extend_branch(new_leaf)
+                self.most_recent_leaf = new_leaf  # Update the most recent leaf
+            else:
+                logging.warning("Invalid leaf hash. Leaf not added to the chain.")
         else:
-            self.chain.append(new_stem)
-            self.most_recent_stem = new_stem
-            logging.info(f"Added new stem with difficulty {new_stem.difficulty}")
+            if new_stem.is_valid_stem():
+                self.chain.append(new_stem)
+                self.most_recent_stem = new_stem
+                logging.info(f"Added new stem with difficulty {new_stem.difficulty}")
+            else:
+                logging.warning("Invalid stem hash. Stem not added to the chain.")
 
     def extend_branch(self, new_leaf):
         if isinstance(new_leaf, Leaf):
-            if self.is_valid_leaf(new_leaf):
-                last_block = self.get_last_block()
-                if last_block:
-                    new_leaf.previous_hash = last_block.hash
-                else:
-                    logging.warning("No blocks in the chain. Ensure a genesis block is created first.")
-                    return False
-                self.chain.append(new_leaf)
-                self.start_next_epoch()
-                self.update_dag(last_block, new_leaf)
-                for fruit in new_leaf.fruits:
-                    new_leaf.fruits_digest.add(fruit.hash)
-                if new_leaf.previous_hash:
-                    prev_leaf = self.get_leaf_by_hash(new_leaf.previous_hash)
-                    if prev_leaf:
-                        self.enlist_producer(prev_leaf.public_key)
-                logging.info(f"Added new leaf with hash {new_leaf.hash}")
-                return True
+            last_block = self.get_last_leaf()
+            if last_block:
+                new_leaf.previous_hash = last_block.hash
             else:
-                logging.warning("New leaf is not valid.")
+                logging.warning("No blocks in the chain. Ensure a genesis block is created first.")
                 return False
+            self.chain.append(new_leaf)
+            self.start_next_epoch()
+            self.update_dag(last_block, new_leaf)
+            for fruit in new_leaf.fruits:
+                new_leaf.fruits_digest.add(fruit.hash)
+                self.enlist_producer(fruit.pk, self.current_epoch)  # Pass the current epoch as the last contribution epoch
+            logging.info(f"Added new leaf with hash {new_leaf.hash}")
+            return True
         else:
             logging.warning("Invalid block type. Expected a Leaf instance.")
             return False
 
-    def is_valid_leaf(self, leaf):
-        if not leaf.verify():
-            logging.warning("Invalid leaf block signature.")
-            return False
-        last_block = self.get_last_block()
-        if last_block.hash != leaf.previous_hash:
-            logging.warning("Invalid leaf block. Previous hash mismatch.")
-            return False
-        return True
-
-    def get_last_block(self):
+    def get_last_leaf(self):
         for block in reversed(self.chain):
             if isinstance(block, Leaf):
                 return block
         return None
 
-    def enlist_producer(self, public_key, max_epochs=3):
+
+    def enlist_producer(self, public_key, last_contribution_epoch):
         if self.current_epoch + 1 not in self.enlisted_producers:
-            self.enlisted_producers[self.current_epoch + 1] = {public_key: max_epochs}
-            logging.info(f"Enlisted producer {public_key} for epoch {self.current_epoch + 1}")
-        elif public_key in self.enlisted_producers[self.current_epoch + 1]:
-            self.enlisted_producers[self.current_epoch + 1][public_key] = max_epochs  # Reset the max_epochs count
-            logging.info(f"Re-enlisted producer {public_key} for epoch {self.current_epoch + 1}")
+            self.enlisted_producers[self.current_epoch + 1] = {}
+        if public_key in self.enlisted_producers[self.current_epoch + 1]:
+            if last_contribution_epoch > self.enlisted_producers[self.current_epoch + 1][public_key]['last_contribution']:
+                self.enlisted_producers[self.current_epoch + 1][public_key]['last_contribution'] = last_contribution_epoch
+                logging.info(f"Updated last contribution for producer {public_key} in epoch {self.current_epoch + 1}")
         else:
-            self.enlisted_producers[self.current_epoch + 1][public_key] = max_epochs
-            logging.info(f"Enlisted producer {public_key} for epoch {self.current_epoch + 1}")
+            if self.current_epoch - last_contribution_epoch <= 1:
+                self.enlisted_producers[self.current_epoch + 1][public_key] = {'last_contribution': last_contribution_epoch}
+                logging.info(f"Enlisted producer {public_key} for epoch {self.current_epoch + 1}")
+
+    def reconfigure_committee(self, new_committee):
+        self.enlisted_producers[self.current_epoch + 1] = {pk: float('inf') for pk in new_committee}
+        logging.info(f"Reconfigured committee for epoch {self.current_epoch + 1}: {new_committee}")
+
 
     def is_producer_enlisted(self, epoch, public_key):
         """Checks if a producer is enlisted for a given epoch."""
-        return public_key in self.enlisted_producers.get(epoch, [])       
+        return public_key in self.enlisted_producers.get(epoch, {})
 
     def get_leaf_by_hash(self, hash):
         for block in reversed(self.chain):
@@ -221,6 +234,15 @@ class Blockchain:
     def start_next_epoch(self):
         self.current_epoch += 1
         logging.info(f"Starting epoch {self.current_epoch}")
+        
+        if self.current_epoch - 2 in self.enlisted_producers:
+         inactive_members = [
+            pk for pk, data in self.enlisted_producers[self.current_epoch - 2].items()
+            if data['last_contribution'] < self.current_epoch - 2
+        ]
+        for pk in inactive_members:
+            del self.enlisted_producers[self.current_epoch - 2][pk]
+            logging.info(f"Removed inactive committee member {pk} from epoch {self.current_epoch - 2}")
 
     def update_dag(self, last_block, new_leaf):
         # Update DAG logic here
